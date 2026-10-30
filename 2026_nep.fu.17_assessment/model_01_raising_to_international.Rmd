@@ -1,0 +1,539 @@
+---
+title: "model_01_raising to international"
+author: "WGNEPH Author"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r libs, message=FALSE, echo=TRUE, warning=FALSE}
+gc()
+rm(list=ls())
+
+library(RODBC)
+library(tidyverse)
+library(lattice)
+library(lubridate)
+library(mapplots)
+library(sp)
+library(sf)
+library(reshape2)
+library(readxl)
+library(knitr)
+library(DataCombine)
+library(lattice)
+library(icesTAF)
+library(magrittr)
+library(viridis)
+library(sessioninfo)
+library(stringr)
+```
+
+
+# Setup options
+
+```{r setupoptions}
+curr.year <- 2026
+dat.year <- curr.year -1
+fu.n <- "FU17"
+
+save.plots <- F # set it up as T or F whether you want to save the plots when running all the chunks or kniting the document
+save.tables <- F # set it up as T or F whether you want to save the tables "propmature"" and the "L50" into .txt files when running all the chunks or knitting the document
+
+# lfd plot
+source("boot/initial/functions/required.funcs.r")
+source("boot/initial/functions/ld1.plot.r")
+```
+
+# Introduction
+
+The goals of this R Markdown document are to:
+
+* Rasie national lfd to the international landings and calculate fishery summary table.
+* Write TAF data tables
+
+Files before (inside "data/intercatch"):
+
+* fu17.int.land.csv
+* NepLand.WGNEPH2026.csv
+* fu17.nat.qlfd.all.wg2026.csv
+
+Files after (inside "model_01"):
+
+* fu17.international_landings.csv
+* fu17.national_landings.csv
+* fu17_Int.lfd.png
+* fu17_meanld.csv
+* fu17_fishery_summary.csv
+* fu17_National_landings_qtr.png
+* fu17.int.qlfd.csv
+
+
+## National Landings Revisions.
+<a href="#top">Back to top</a>
+
+
+```{r nat land, echo=TRUE, message=FALSE, fig.height=7, fig.width=12, warning=FALSE, fig.cap="FU17 Irish  Landings (t) by quarter."}
+
+nat <- read.csv("boot/data/intercatch/NepLand_WGNEPH2026.csv")
+str(nat)
+nat$LiveWt <-as.numeric(as.character(nat$LiveWt))
+nat$LiveWtRaisedToDecs <-as.numeric(as.character(nat$LiveWtRaisedToDecs))
+aggregate(LiveWt/1000 ~ Year + FU, nat, sum)
+
+nat$Quarter <- as.factor(nat$Quarter)
+nat <- nat %>% filter(FU=='17')
+  
+ggplot(nat, aes(as.factor(Year), LiveWt/1000, fill=factor(Quarter))) + 
+  geom_bar(stat="identity", position= "stack") + 
+  theme_bw() + ylab("Landings (tonnes)") + 
+  #ylim(c(0,1500)) +
+  labs(fill = "Quarter") +
+  xlab("Year") +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank())
+
+nl <- nat %>% group_by(Year, Quarter) %>% summarise(tot =sum(LiveWt)) 
+
+nl <- nl %>% spread( Quarter, -Year) 
+nl$Total<- rowSums(nl[,2:5], na.rm=TRUE)
+
+knitr::kable(nl , digits=2)
+
+
+if (save.plots == T) {
+  ggsave("model/model_01_raising_to_international/FU17_National_Landings_qtr.png")
+}
+
+ if (save.tables == T) {
+   write.csv(nl, "model/model_01_raising_to_international/fu17.national.landings.csv", row.names = F)
+   }
+
+```
+
+
+## InterNational Landings 
+<a href="#top">Back to top</a>
+
+```{r int land, echo=TRUE, fig.height=10, fig.width=10, message=FALSE, warning=FALSE, fig.cap="FU17 International Landings (t) ."}
+
+int.land <- read.csv("boot/data/intercatch/fu17.int.land.csv")
+
+knitr::kable(int.land , digits=3)
+
+int.land <- gather(int.land,"country", "landings",2:4) 
+
+pi <- ggplot(int.land, aes(Year, landings, fill=country)) + geom_bar(stat="identity", position= "stack") + 
+  theme_bw() + ylab("Landings in Tonnes") +
+  scale_fill_manual(breaks = c("France", "Ireland", "UK"),
+                     values=c("#56B4E9","#009E73", "#CC6666")) +
+  theme(panel.grid.major=element_blank(), panel.grid.minor=element_blank()) +
+ scale_x_continuous(breaks = seq(1975, 2025, by = 5))+
+  scale_y_continuous(breaks = seq(0, 1500, 250))
+
+pi + theme(axis.text=element_text(size=12),axis.title=element_text(size=14),legend.text = element_text(size = 16),legend.title = element_text(size = 16)) 
+
+
+
+int.land <- int.land %>% mutate_all(funs(replace(., is.na(.), 0)))
+
+int <- int.land %>% group_by(Year) %>% summarise(total=sum(landings))
+names(int) <- c("year","total")
+int$year  <- as.numeric(int$year)
+
+if (save.plots == T) {
+  write.csv(int, "model/model_01_raising_to_international/fu17.international.landings.csv", row.names = F)
+}
+
+ if (save.tables == T) {
+   ggsave("model/model_01_raising_to_international/FU17_International_Landings.png", width = 12, height = 6, dpi = 300)
+   }
+
+```
+
+
+## Read in quarterly raised data from 01_FU17_Extraction_WGNEPH_2025.rmd
+<a href="#top">Back to top</a>
+
+```{r load data, include=FALSE}
+
+qlfd.wg <- read.csv("boot/data/intercatch/fu17.nat.qlfd.all.taf.2026.csv")
+```
+
+
+
+## Now the International Raising Factor
+<a href="#top">Back to top</a>
+
+Sampling review 2026 - raised discards 
+Calculate annual raising factor.
+Plot proportions of Irish landings in the fishery.
+Create international raised data file.
+
+```{r raising int, echo=TRUE, warning=FALSE}
+
+int.dat <- qlfd.wg %>% group_by(year) %>% summarise(lan.wgt =sum(rlan.wt.r), dis.wgt =sum(rdis.wt.r))
+                                           
+int.dat <- left_join(int, int.dat, by="year")
+
+int.dat$rf.lan <- with(int.dat, total/lan.wgt)   
+
+int.dat <- int.dat %>% mutate_all(funs(replace(., is.na(.), 0)))                
+
+so <- read.csv("boot/data/intercatch/stock_overview.csv")
+
+so <- so %>%
+  filter(Catch.Cat. == "Discards") %>%
+  group_by(Country, Fleets, Year) %>%
+  summarise(total_discards = sum(Catch..kg, na.rm = TRUE)/1000, .groups = "drop")
+
+
+so <- so %>% group_by(Year) %>% summarise(int.discards = sum(total_discards))
+
+#filling missing years
+so_updated <- so  %>%
+  complete(Year = 1974:2025, fill = list(int.discards = 0)) %>%
+  arrange(Year) %>% rename(year = Year)
+
+#merge so_updated into int.dat
+int.dat <- left_join(int.dat, so_updated, by="year")
+
+#new rf discrd column
+int.dat$rf.discard <- with(int.dat, int.discards/dis.wgt)
+
+#If rf.discrd is 0 replace it with 1
+int.dat <- int.dat %>%
+  mutate(rf.discard = ifelse(rf.discard == 0, 1, rf.discard))
+
+#Replace NAs
+int.dat <- int.dat %>% mutate_all(funs(replace(., is.na(.), 0))) 
+
+
+#Join
+dat <- left_join(qlfd.wg, int.dat, by="year")
+
+
+dat$rdis.num <- with(dat, rdis.n.r*rf.discard)
+dat$rlan.num <- with(dat, rlan.n.r*rf.lan)
+dat$rdis.wt <- with(dat, rdis.wt.r*rf.discard)
+dat$rlan.wt <- with(dat, rlan.wt.r*rf.lan)
+
+
+#check numbers
+check <- dat %>% group_by(year) %>% summarise(int.lan.num =sum(rlan.num), #2996.7
+                                      int.lan.wgt =sum(rlan.wt),
+                                      int.dis.num =sum(rdis.num),
+                                      int.dis.wgt =sum(rdis.wt))
+knitr::kable(check , digits=5)
+
+ if (save.tables == T) {
+   write.csv(dat, "model/model_01_raising_to_international/fu17.int.qlfd.review.csv",  sep=",", row.names = F)
+ }
+
+```
+
+## Assessment Summary data table - I think stop here - rest was wo up and showing review (may need to delete after this chunk)
+<a href="#top">Back to top</a>
+
+First calculate exploitation pattern.
+Landings and discards by weight (tonne) and number ('000s).
+Estimated mean weight (gr) in landings and discards.
+Discard rates by weight (tonne) and number ('000s) from the raised derived data using the annual discard ogive.
+Removals in number.
+Dead discard rate by weight (tonne) and number ('000s). 
+Proportion Removals retained by number ('000s).
+Discard survival estimated as 25%.
+```{r summary table}
+summ <- dat %>% group_by(year) %>% summarise(int.lan.num =sum(rlan.num)/1000, 
+                                              int.lan.wgt =sum(rlan.wt),
+                                              int.dis.num =sum(rdis.num)/1000,
+                                              int.dis.wgt =sum(rdis.wt))  %>%
+                                    mutate  (mw.lan = (int.lan.wgt/int.lan.num),
+                                             mw.dis = (int.dis.wgt/int.dis.num),
+                                             dis.rn = int.dis.num/(int.lan.num + int.dis.num),
+                                             dis.rw = int.dis.wgt/(int.lan.wgt + int.dis.wgt),
+                                             removals.n = (int.dis.num * 0.75 + int.lan.num),
+                                             dead.disc.r = 1-int.lan.num/removals.n,
+                                             dead.disc.wgt = int.dis.wgt * 0.75,
+                                             prop.removals.ret =int.lan.num/removals.n)
+
+
+knitr::kable(summ , digits=3)
+
+if (save.tables == T) {
+   write.csv(summ, "model/model_01_raising_to_international/fu17.fishery.summary.int.raise.review.csv",  row.names = F)
+ }
+```
+
+## Read in quarterly raised data 
+Aggregated raised to national landings lfd
+<a href="#top">Back to top</a>
+
+```{r fishery_summary, include=FALSE}
+
+int.rev <- summ
+int.sal <- read.csv("boot/data/intercatch/fu17.fishery.summary.int.raise_saly.csv")
+
+int.rev$process <- "review"
+
+int.sal$process <- "saly"
+
+int.full <- rbind(int.sal, int.rev)
+```
+
+
+## Assessment summary (discards raised to interational)
+
+```{r dat, echo=TRUE, fig.height=8, fig.width=8}
+
+
+tv <- read.csv("boot/data/intercatch/FU17.total.abund.estimates.csv")
+tv <- tv %>% rename(year = Year)
+
+#exp <- merge(summ, tv[,c("year", "upper", "abund", "lower")], by = "year")
+
+# Interpolate 2021 and 2023 abundance values for 2022 (no survey)
+tv$abund[tv$year == 2022] <- mean(tv$abund[tv$year %in% c(2021, 2023)]) 
+
+# Interpolate 2021 and 2023 upper and lower abundance values for 2022 (no survey) - added for getting CI values hr
+tv$lower[tv$year == 2022] <- mean(tv$lower[tv$year %in% c(2021, 2023)])
+tv$upper[tv$year == 2022] <- mean(tv$upper[tv$year %in% c(2021, 2023)])
+
+tv$ci <- with(tv, abs(abund-upper))
+#exp$harvest.rate <- with(exp, removals.n/abund)*100
+
+
+# calculate hr
+exp <- right_join(int.full, tv, by="year") %>% mutate(hr = removals.n/abund*100,
+                                                  hr.lower =  removals.n/upper*100,
+                                                  hr.higher =  removals.n/lower*100)
+
+exp$ogive <- 'annual'
+
+exp <- exp %>%
+  rename(
+    harvest.rate = hr,
+    harvest.rate.lower = hr.lower,
+    harvest.rate.upper = hr.higher
+  )
+
+#put in same format for report/adg same 
+fu17.exp <- exp[c("year", "int.lan.num", "int.dis.num", "int.lan.wgt", "int.dis.wgt", "removals.n", "prop.removals.ret", "dead.disc.r", "dis.rn", "dis.rw", "mw.lan", "mw.dis", "abund", "ci", "upper", "lower", "harvest.rate",  "process")]
+
+#Sort data 
+fu17.exp <- fu17.exp %>% arrange(year)
+
+
+knitr::kable(fu17.exp[ ,c(1:8)] , digits=3)
+knitr::kable(fu17.exp[ ,c(1, 9:18)] , digits=3)
+
+```
+
+
+# discard rate by weight and number plot
+```{r dat1, echo=TRUE, fig.height=8, fig.width=10}
+
+
+dat1 <- exp %>%
+  filter(year %in% 2008:2026) %>%
+  select("year","dis.rn", "dis.rw", "process")
+
+knitr::kable(
+  dat1 %>% 
+    pivot_wider(names_from = process, values_from = c( "dis.rn", "dis.rw")),
+  digits = 4
+)
+
+ dat.wide <-  dat1 %>% 
+    pivot_wider(names_from = process, values_from = c( "dis.rn", "dis.rw"))
+ 
+ write.csv(dat.wide, "dat.wide.csv")
+
+dat_long <- dat1 %>%
+  pivot_longer(cols = c("dis.rn", "dis.rw"), 
+               names_to = "type", 
+               values_to = "value")
+
+
+d <- ggplot(dat_long, aes(year, value, group = process, colour=factor(process))) + 
+  geom_line(size = 1) +
+  geom_point() +
+  ylab("Discard rate (%)") +
+  theme_bw() +
+  coord_cartesian(ylim= c(0, 1), xlim=c(2008, 2026)) +
+  scale_x_continuous(name="\nYear",
+                     breaks = seq(min(as.numeric(as.character(dat_long$year))),
+                                  max(as.numeric(as.character(dat_long$year))), by = 3)) +
+  scale_colour_viridis_d(name = "Type", option = "D", end = 0.9) +  # Using color-blind friendly palette
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=12),
+        legend.title=element_blank(),
+        panel.grid=element_blank(),
+        legend.position = "bottom") + facet_wrap(~ type) 
+  
+
+d
+
+
+
+if (save.plots == T) {
+  ggsave("FU17_Discard_rate_RF_review.png")
+}
+```
+
+#  harvest rate plot
+```{r dat2, echo=TRUE, fig.height=8, fig.width=8}
+
+dat1 <- exp %>%
+  filter(year %in% 2008:2026) %>%
+  select("year","harvest.rate","process")
+
+knitr::kable(
+  dat1 %>% 
+    pivot_wider(names_from = process, values_from = c(harvest.rate)),
+  digits = 4
+)
+
+dat_long <- dat1 %>%
+  pivot_longer(cols = c(harvest.rate), 
+               names_to = "type", 
+               values_to = "value")
+
+
+d <- ggplot(dat_long, aes(year, value, group = process, colour=factor(process))) + 
+  geom_line(size = 1) +
+  geom_point() +
+  ylab("Harvest rate (%)") +
+  theme_bw() +
+  coord_cartesian(ylim= c(0, 40), xlim=c(2008, 2026)) +
+  scale_x_continuous(name="\nYear",
+                     breaks = seq(min(as.numeric(as.character(dat_long$year))),
+                                  max(as.numeric(as.character(dat_long$year))), by = 3)) +
+  scale_colour_viridis_d(name = "Type", option = "D", end = 0.9) +  # Using color-blind friendly palette
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=12),
+        legend.title=element_blank(),
+        panel.grid=element_blank(),
+        legend.position = "bottom") + facet_wrap(~ type) 
+  
+
+
+d + geom_hline(aes(yintercept=12.8),size = 1,colour="blue", linetype="dashed") + theme(axis.text=element_text(size=10),axis.title=element_text(size=10)) 
+
+
+if (save.plots == T) {
+  ggsave("FU17_Harvest_rate_RF_review.png")
+}
+```
+
+#  catch options revised
+Raised correctly based on submitted Intercatch data
+
+```{r dat3, echo=TRUE, fig.height=8, fig.width=8}
+
+curr.year <- 2025
+
+
+# full range for Aran - for the mean estimations
+land.wt.yrs <- seq(2008,curr.year-1,1)
+land.wt.yrs
+disc.wt.yrs <- seq(2008,curr.year-1,1)
+disc.wt.yrs
+
+discard.rate.yrs <- seq(curr.year-3, curr.year-1,1)
+dead.discard.rate.yrs <- seq(curr.year-3, curr.year-1,1)
+prop.removal.ret.yrs <- seq(curr.year-3, curr.year-1,1)
+
+exp.rev <- exp %>% filter(process=="review")
+stock.abundance <- exp.rev$abund[length(exp.rev$abund)]
+
+land.mean.wt <- mean(exp.rev$mw.lan[exp.rev$year %in% land.wt.yrs],na.rm=T)
+disc.mean.wt <- mean(exp.rev$mw.dis[exp.rev$year %in% land.wt.yrs],na.rm=T)
+
+discard.rate <- mean(fu17.exp$dis.rn[fu17.exp$year%in% discard.rate.yrs],na.rm=T)
+
+dead.discard.rate <- mean(exp.rev$dead.disc.r[exp.rev$year %in% dead.discard.rate.yrs],na.rm=T)
+prop.removal.ret.n <- mean(exp.rev$prop.removals.ret[exp.rev$year %in% prop.removal.ret.yrs], na.rm=T)
+disc.survival <- 25
+
+
+fu17.catch.inputs.rev<- data.frame(curr.year, stock.abundance, land.mean.wt, disc.mean.wt,discard.rate,dead.discard.rate,disc.survival)
+fu17.catch.inputs.rev$process <- "review"
+
+
+knitr::kable(fu17.catch.inputs.rev , digits=5)
+
+
+
+fu17.catch.inputs.sal <- read.csv("boot/data/intercatch/fu17.catch.inputs.ADG.csv") #last years file 
+fu17.catch.inputs.sal$process <- "saly"
+
+knitr::kable(fu17.catch.inputs.sal , digits=5)
+
+# if (save.tables == T) {
+#write.table(exp.rev, "model/model_01_raising_to_international/fu22_fishery_summary.int.raise_review.csv",  sep=",", row.names = F)
+ #}
+
+rev <- fu17.catch.inputs.rev %>%
+  rename(year = curr.year)
+
+sal <- fu17.catch.inputs.sal %>%
+  rename(year = wgneph.yr)
+```
+
+
+## Plot the raised international length frequency data from the annual ogive method.
+<a href="#top">Back to top</a>
+
+Raised length frequency distributions and mean size displayed.
+```{r summary plot1, echo=FALSE, warning=FALSE, fig.height= 10, fig.width=8,fig.align='center', fig.cap="FU17 Raised LFD and mean size displayed where black line = mean size in landings and red line = mean size in discards."}
+
+rldf <- dat[c(2:5, 19:20)] # "year"     "q"        "cl"       "sex"      "rdis.num" "rlan.num"
+
+#eshapes your data from wide → long format
+rldf <- rldf %>% gather("type", "n",5:6) #rdis.num, rlan.num
+rldf$type <- ifelse(rldf$type=="rdis.num", "Discards", "Landings")#If type equals "rdis.num" call it "Discards"Otherwise call it "Landings"
+rldf$col <- ifelse(rldf$type=="Landings","white","red")
+
+#ggplot(rldf , aes(x= cl, y= n, fill=type)) + geom_bar(stat="identity") + facet_grid(year~q)
+pm <- ggplot(rldf , aes(x= cl, y= n, fill=type)) + geom_bar(stat="identity") 
+rldf$cl.n <- rldf$cl*rldf$n
+#get mean for lfd *here
+vline.data <- rldf %>% group_by(year, sex, type)  %>% summarise(mean=sum(cl.n)/sum(n))
+
+
+ if (save.tables == T) {
+   write.csv(vline.data, "model/model_01_raising_to_international/fu17_meanld.csv",  sep=",", row.names = F)
+ }
+
+
+vline.l  <- subset(vline.data, type=="Landings")
+vline.d  <- subset(vline.data, type=="Discards")
+
+pm + facet_grid(year~sex) + 
+  theme(strip.text.y = element_text(size = 10)) +
+  scale_fill_manual(values=c("blue","grey")) +
+  geom_vline(aes(xintercept= vline.l$mean), vline.l, colour="black", linetype="solid") +
+  geom_vline(aes(xintercept= vline.d$mean), vline.d, colour="red", linetype="solid") +
+  theme_bw() 
+
+if (save.plots == T) {
+  ggsave("model/model_01_raising_to_international/fu17.Int.lfd.png", width=6)
+}
+
+
+```
+
+
+
+<a href="#top">Back to top</a>
